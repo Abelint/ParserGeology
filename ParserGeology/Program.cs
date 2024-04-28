@@ -8,6 +8,9 @@ using Microsoft.VisualBasic.FileIO;
 using System.Diagnostics;
 using System;
 using System.Data;
+using System.Net.Http.Headers;
+using System.Threading;
+using System.Linq.Expressions;
 
 namespace ParserGeology
 {
@@ -17,20 +20,23 @@ namespace ParserGeology
         static Stopwatch stopwatch;
         static int bigCount = 0;
         static SQLiteConnection m_dbConnection;
-        static   string namedb = "Parser_short";
+        static   string namedb = "Parser";
         static  string tableName = "Parse";
         static List<Thread> threads = new List<Thread>();
         static List<string> gcndb;
-        
+        static List<string> massData = new List<string>();
+
+        static SemaphoreSlim semaphoreSlim = new SemaphoreSlim(50);
+
+        static MeanTable[] means;
+        static List<MeanTable> meanList = new List<MeanTable>();
         static void Main(string[] args)
         {
 
-            long freq = Stopwatch.Frequency; //частота таймера
-            stopwatch = new Stopwatch();
-            stopwatch.Start();
 
             string path = "opendata.csv";
 
+            int lineCount = File.ReadLines(path).Count();
            
             string firstLine = File.ReadLines(path).ElementAtOrDefault(0);
             string[] col2 = firstLine.Split(';');
@@ -46,12 +52,43 @@ namespace ParserGeology
             CreateDB(namedb);
 
             string connectionString = "Data Source=" + namedb + ".sqlite;Version=3;";
-             m_dbConnection = new SQLiteConnection(connectionString);
+            m_dbConnection = new SQLiteConnection(connectionString);
             m_dbConnection.Open();
 
             CreateTableDB(m_dbConnection, namedb, tableName, col, CK);
+            string sqlExpression = "SELECT * FROM MEAN";
+
+           
+            SQLiteCommand command = new SQLiteCommand(sqlExpression, m_dbConnection);
+            using (SQLiteDataReader reader = command.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    MeanTable mean = new MeanTable();
+                    mean.Id =(long) reader.GetValue(0);
+                    mean.Grad = Convert.ToInt32( reader.GetValue(1));
+                    mean.Minute = Convert.ToInt32(reader.GetValue(2));
+                    mean.Second = (string) reader.GetValue(3);
+                    meanList.Add(mean);
+                }
+            }
+            means = meanList.ToArray();
+            meanList.Clear();
 
             gcndb = GetColumnNameDB(m_dbConnection, namedb, tableName);
+
+
+            //List<string> lines = File.ReadAllLines(path); // Читаем все строки из файла
+
+            //foreach (string line in lines)
+            //{
+            //    semaphoreSlim.Wait(); // Ждем, чтобы не превысить лимит потоков
+            //    ThreadPool.QueueUserWorkItem(ProcessLine, line); // Помещаем задачу в пул потоков для обработки строки
+            //}
+
+            //Console.ReadLine();
+            Console.WriteLine("Создание базы участков");
+
             int count = 0;
             using (StreamReader reader = new StreamReader(path))
             {
@@ -60,28 +97,50 @@ namespace ParserGeology
                 {
                     count++;
                     if (count == 1) continue;
-
-                    AddToTableDB(line);
+                    string[] goparses;
+                   
+                    ParseStr(line);
+                  
+                    //AddToTableDB(line);
 
                 }
             }
             while (!CheckThreadsForEnd(threads));
-           
+            stopwatch.Stop();
+            long freq = Stopwatch.Frequency;
+            double sec = (double)stopwatch.ElapsedTicks / freq; //переводим такты в секунды
+            Console.WriteLine($"Частота таймера {freq} такт/с \r\n Время в тактах {stopwatch.ElapsedTicks} \r\n Время в секундах  {(double)stopwatch.ElapsedTicks / freq}");
 
-          
-           foreach(string gcn in gcndb)
+
+
+            foreach (string gcn in gcndb)
             {
                 Console.WriteLine(gcn);
             }
-            
+            Console.WriteLine("Идет обновление базы, ожидайте");
+            AddMeanToTablenMEAN(meanList, "MEAN");
             m_dbConnection.Close();
-
-            stopwatch.Stop();
-            double sec = (double)stopwatch.ElapsedTicks / freq; //переводим такты в секунды
-            Console.WriteLine($"Частота таймера {freq} такт/с \r\n Время в тактах {stopwatch.ElapsedTicks} \r\n Время в секундах  {(double)stopwatch.ElapsedTicks / freq}");
+            Console.WriteLine("Приложение можно закрыть");
         }
 
-      static   private bool CheckThreadsForEnd(List<Thread> aThreads /* Список потоков */)
+        static void ParseStr(object strokaForParse)
+        {
+           
+            string[] goparses;
+
+            StringReader reader = new StringReader((string)strokaForParse);
+            using (TextFieldParser parser = new TextFieldParser(reader))
+            {
+                parser.TextFieldType = FieldType.Delimited;
+                parser.SetDelimiters(";");
+                goparses = parser.ReadFields();
+
+            }
+            ResultCallBackMethod(goparses);
+
+        }
+
+        static   private bool CheckThreadsForEnd(List<Thread> aThreads /* Список потоков */)
         {
             if (aThreads.Count == 0) { return true;/* 0 потоков*/}
 
@@ -105,7 +164,9 @@ namespace ParserGeology
         /// <param name="goparses"></param>
         public static void ResultCallBackMethod(string[] goparses)
         {
-            // Console.WriteLine("The Result is " + goparses.Length);
+
+
+
             StringBuilder sqlSB = new StringBuilder();
            
             sqlSB.Append("Insert into " + tableName + " (");
@@ -113,17 +174,38 @@ namespace ParserGeology
 
             for (int i = 1; i < gcndb.Count; i++)
             {
-                if (i != gcndb.Count - 1) sqlSB.Append(gcndb[i] + ", ");
-                else sqlSB.Append(gcndb[i]);
+                //if (i != gcndb.Count - 1) sqlSB.Append(gcndb[i] + ", ");
+                //else sqlSB.Append(gcndb[i]);
+                switch (i.CompareTo(gcndb.Count - 1))
+                {                   
+                   
+                    case 0:
+                        sqlSB.Append(gcndb[i]);
+                        break;
+                   default:
+                        sqlSB.Append(gcndb[i] + ", ");
+                        break;
+
+                }
+
             }
+
+
+
+
+
             sqlSB.Append(") values (");
 
+            stopwatch = new Stopwatch();
+            stopwatch.Start();
+            long tiki = 0;
 
             for (int i = 0; i < goparses.Length; i++)
             {
                 if (i == 8)
                 {
                     sqlSB.Append("'");
+                   
                     sqlSB.Append(MeanInTable(goparses[i], namedb, "MEAN"));
                     sqlSB.Append("', ");
                 }
@@ -135,7 +217,24 @@ namespace ParserGeology
                     sqlSB.Append(goparses[i]);
                     sqlSB.Append("'");
                 }
+                //switch (i)
+                //{
+                //    case 8:
+                //        sqlSB.Append("'");
+                //        sqlSB.Append(MeanInTable(goparses[i], namedb, "MEAN"));
+                //        sqlSB.Append("', ");
+                //        break;
+
+
+                //}
             }
+
+
+            long ticks = stopwatch.Elapsed.Ticks;
+           // Console.WriteLine((double)(ticks - tiki));
+            tiki = ticks;
+
+
             sqlSB.Append(", '");
             sqlSB.Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
             sqlSB.Append("', '" + SkInTable(goparses[8], namedb, "MEAN"));
@@ -144,11 +243,13 @@ namespace ParserGeology
 
             // sql = "Insert into Parse (№_п_п, Государственный_регистрационный_номер, Наличие_полного_электронного_образа, Дата_присвоения_государственного_регистрационного_номера_лицензии, Целевое_назначение_лицензии, Вид_полезного_ископаемого, Наименование_участка_недр__предоставленного_в_пользование_по_лицензии__кадастровый_номер_месторождения_или_проявления_полезных_ископаемых_в_ГКМ, Наименование_субъекта_Российской_Федерации_или_иной_территории__на_которой_расположен_участок_недр, Географические_координаты_угловых_точек_участка_недр__верхняя_и_нижняя_границы_участка_недр, Статус_участка_недр, Сведения_о_пользователе_недр, Наименование_органа__выдавшего_лицензию, Реквизиты_документа__на_основании_которого_выдана_лицензия_на_пользование_недрами, Сведения_о_внесении_изменений_и_дополнений_в_лицензию_на_пользование_недрами__сведения_о_наличии_их_электронных_образов, Сведения_о_переоформлении_лицензии_на_пользование_недрами, Реквизиты_приказа_о_прекращении_права_пользования_недрами__приостановлении_или_ограничении_права_пользования_недрами, Дата_прекращения_права_пользования_недрами, Срок_и_условия_приостановления_или_ограничения_права_пользования_недрами, Дата_окончания_срока_действия_лицензии, Сведения_о_реестровых_записях_в_отношении_ранее_выданных_лицензий_на_пользование_соответствующим_участком_недр, Ссылка_на_карточку_лицензии) values ('16', '13', '14', '5', '2', '4', '1', '10', '11', '6', '7', '15', '7', '6', '1', '10', '8', '19', '19', '9', '18')";
             string te = sqlSB.ToString();
+            massData.Add(te);
             SQLiteCommand command = new SQLiteCommand(te, m_dbConnection);
 
             command.ExecuteNonQuery();
-            bigCount++;
-            Console.WriteLine($"{bigCount} Время в секундах  {stopwatch.ElapsedMilliseconds/1000}");
+            
+           
+
         }
         private static List<string> GetColumnNameDB(SQLiteConnection m_dbConnection, string namedb, string tabledb)
         {
@@ -215,7 +316,6 @@ namespace ParserGeology
             MatchCollection matches = regex.Matches(mean);
             string stroka = "";
 
-            bigCount++;
 
             if (matches.Count > 0)
             {
@@ -229,8 +329,10 @@ namespace ParserGeology
                     Int32 b = Convert.ToInt32(massTemp[0]);
                     massTemp = massTemp[1].Split('\"');
                     float c = (float)Convert.ToDouble(massTemp[0].Replace('.',','));
+                   // stroka += "[FF]" + massTemp[1] + ' ';
+                    stroka += FindID(a,b,c)+ massTemp[1]+' ';
 
-                    stroka+=  AddMeanToTablenMEAN(a,b,c,nameDB,tableName)+ massTemp[1]+' ';
+                   
                 }
 
             }
@@ -243,35 +345,54 @@ namespace ParserGeology
 
             return stroka;
         } 
-        private static string AddMeanToTablenMEAN(Int32 a, Int32 b, float c, string nameDB, string tableName)
+
+        private static string FindID(Int32 a, Int32 b, float c)
         {
-
-            string num = null;
-          
-            string  sql = "INSERT INTO MEAN (Grad, Minute, Second)\r\nSELECT '"+a+"', '"+b+"', '"+c+"'\r\n" +
-                "WHERE NOT EXISTS (SELECT id FROM MEAN WHERE Grad = '"+a+"' AND Minute = '"+b+"' AND Second = '"+c+"');\r\n\r\n" +
-                "SELECT id\r\nFROM MEAN\r\nWHERE Grad = '"+a+"' AND Minute = '"+b+"' AND Second = '"+c+"';\r\n";
-
-          //  sql = "SELECT id FROM MEAN WHERE Grad = '0' AND Minute = '0' AND Second = '0'";
-            SQLiteCommand command = new SQLiteCommand(sql, m_dbConnection);
-
-            using (SQLiteDataReader reader = command.ExecuteReader())
+            foreach (MeanTable mean in means)
             {
-                if (reader.HasRows) // если есть данные
+                if (a == mean.Grad && b == mean.Minute && c.ToString() == mean.Second)
                 {
-                   
-                    while (reader.Read())   // построчно считываем данные
-                    {
-                        num = reader.GetValue(0).ToString();
-                       
-                    }
+                    return mean.Id.ToString();
                 }
             }
 
-         
+            MeanTable tmp = new MeanTable
+            {
+                Id = -1,
+                Grad = a,
+                Minute = b,
+                Second = c.ToString()
+            };
+            meanList.Add(tmp);
 
-            return num;
+            long ID = means.Length + meanList.Count;
+            return ID.ToString();
         }
+
+        private static void AddMeanToTablenMEAN(List<MeanTable> means, string tableName)
+        {
+            string sql = "";
+            int leng = 0;
+            while (means.Count > 0)
+            {
+                leng++;              
+                
+                sql += "Insert into "+tableName+"(Grad, Minute, Second) VALUES('" + means[0].Grad +
+                    "', '" + means[0].Minute + "', '" + means[0].Second + "'); ";
+                means.RemoveAt(0);
+
+                if(leng > 49) {
+                    leng = 0;
+                    SQLiteCommand command = new SQLiteCommand(sql, m_dbConnection);
+                    command.ExecuteNonQuery();
+                    sql = "";
+                }
+
+
+            }
+
+        }
+
         private static void CreateTableDB(SQLiteConnection m_dbConnection, string nameDB, string tableName, string[] columns, string[] SK) {
            
 
@@ -330,24 +451,9 @@ namespace ParserGeology
 
         private static void CreateDB(string name)
         {
-            SQLiteConnection.CreateFile(name + ".sqlite");
+            if(!File.Exists(name + ".sqlite")) SQLiteConnection.CreateFile(name + ".sqlite");
         }
 
-        private static string Translite(string s)
-        {
-            StringBuilder ret = new StringBuilder();
-            string[] rus = { "А", "Б", "В", "Г", "Д", "Е", "Ё", "Ж", "З", "И", "Й",
-          "К", "Л", "М", "Н", "О", "П", "Р", "С", "Т", "У", "Ф", "Х", "Ц",
-          "Ч", "Ш", "Щ", "Ъ", "Ы", "Ь", "Э", "Ю", "Я" };
-            string[] eng = { "A", "B", "V", "G", "D", "E", "E", "ZH", "Z", "I", "Y",
-          "K", "L", "M", "N", "O", "P", "R", "S", "T", "U", "F", "KH", "TS",
-          "CH", "SH", "SHCH", null, "Y", null, "E", "YU", "YA" };
-
-            for (int j = 0; j < s.Length; j++)
-                for (int i = 0; i < rus.Length; i++)
-                    if (s.Substring(j, 1) == rus[i]) ret.Append(eng[i]);
-            return ret.ToString();
-        }
-
+     
     }
 }
