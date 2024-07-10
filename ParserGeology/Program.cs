@@ -310,10 +310,22 @@ namespace ParserGeology
         private static string MeanInTable(string mean, string nameDB, string tableName)
         {
 
-
-           // Regex regex = new Regex(@"\d{1,3}°\d{1,2}'\d{1,2}\.\d{0,3}""[NSEWЕ]");
-            Regex regex = new Regex(@"\d{1,3}°\d{1,2}'\d{1,2}(?:\.\d{1,3})?""[NSEWЕ]");
+            string pattern = @"(\d+)\s+(\d+°\d+'\d+\.\d+\""[NS])\s+(\d+°\d+'\d+\.\d+\""[WEЕ])"; // одна Е русская, вот так, East это теперь русское слово и ничего не спрашивайте
+            Regex regex = new Regex(pattern);
             MatchCollection matches = regex.Matches(mean);
+
+            foreach (Match match in matches)
+            {
+                Console.WriteLine($"{match.Groups[1].Value}\t{match.Groups[2].Value}\t{match.Groups[3].Value}");
+            }
+
+            // Regex regex = new Regex(@"\d{1,3}°\d{1,2}'\d{1,2}\.\d{0,3}""[NSEWЕ]");
+            // string pattern = @"\d{1,3}°\d{1,2}'\d{1,2}(?:\.\d{1,3})?""[NSEWЕ]"; // без номеров но работает
+
+
+            //string pattern = @"\d+\s\d+°\d+'\d+\.\d+""[NS]\s\d+°\d+'\d+\.\d+""[WE]";
+            //Regex regex = new Regex(pattern);
+            //MatchCollection matches = regex.Matches(mean);
             string stroka = "";
 
 
@@ -321,16 +333,26 @@ namespace ParserGeology
             {
                 foreach (Match match in matches)
                 {
-                    //Console.WriteLine(match.Value);
-                    string[] massTemp = match.Value.Split('°');
+                    string input = match.Value;
+                    string[] parts = input.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    string[] mas = new string[] { parts[0],parts[1],parts[2] };
 
-                    Int32 a = Convert.ToInt32( massTemp[0]);
-                    massTemp = massTemp[1].Split('\'');
-                    Int32 b = Convert.ToInt32(massTemp[0]);
-                    massTemp = massTemp[1].Split('\"');
-                    float c = (float)Convert.ToDouble(massTemp[0].Replace('.',','));
-                   // stroka += "[FF]" + massTemp[1] + ' ';
-                    stroka += FindID(a,b,c)+ massTemp[1]+' ';
+                    string N =mas[0];
+                   
+
+                    for(int i = 1; i < mas.Length; i++)
+                    {
+                        string[] massTemp = mas[i].Split('°');
+                        Int32 a = Convert.ToInt32(massTemp[0]);
+                        massTemp = massTemp[1].Split('\'');
+                        Int32 b = Convert.ToInt32(massTemp[0]);
+                        massTemp = massTemp[1].Split('\"');
+                        float c = (float)Convert.ToDouble(massTemp[0].Replace('.', ','));
+                        // stroka += "[FF]" + massTemp[1] + ' ';
+                        stroka += N + ":" + FindID(a, b, c) + massTemp[1] + ' ';
+                    }
+
+                  
 
                    
                 }
