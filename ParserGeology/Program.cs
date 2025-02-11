@@ -1,16 +1,14 @@
 ﻿using System.Text;
 
 using System.Data.SQLite;
-using System.Data.Common;
-using System.Collections.Generic;
+
 using System.Text.RegularExpressions;
 using Microsoft.VisualBasic.FileIO;
 using System.Diagnostics;
-using System;
+
 using System.Data;
-using System.Net.Http.Headers;
-using System.Threading;
-using System.Linq.Expressions;
+using System.Xml.Linq;
+
 
 namespace ParserGeology
 {
@@ -20,8 +18,9 @@ namespace ParserGeology
         static Stopwatch stopwatch;
         static int bigCount = 0;
         static SQLiteConnection m_dbConnection;
-        static   string namedb = "Parser";
+        static   string namedb = "Parser_new";
         static  string tableName = "Parse";
+        static string newTableName = "formap";
         static List<Thread> threads = new List<Thread>();
         static List<string> gcndb;
         static List<string> massData = new List<string>();
@@ -32,43 +31,224 @@ namespace ParserGeology
         static List<MeanTable> meanList = new List<MeanTable>();
         static void Main(string[] args)
         {
+            Console.WriteLine("Введите действие\n1-создать исходную базу данных\n2-добавить столбец с координатами для сайта");
+            int key = Convert.ToInt32( Console.ReadLine());
+
+            switch (key)
+            {
+                case 2:
+                    CreateCoordFromDB();
+                    break;
+
+                case 1:
+                    CreateNewDB();
+                    break;
+            }
+
+           
+        }
+
+        static void CreateCoordFromDB()
+        {
+            Console.WriteLine("Модернизируем БД");
+            if(!File.Exists(namedb + ".sqlite"))
+            {
+                Console.WriteLine("БД отсутствует");
+                return;
+            }
+            if (m_dbConnection == null)
+            {
+                string connectionString = "Data Source=" + namedb + ".sqlite;Version=3;";
+                m_dbConnection = new SQLiteConnection(connectionString);
+            }
+            m_dbConnection.Open();
+
+            // Проверяем наличие таблицы
+            string checkTableQuery = $"SELECT name FROM sqlite_master WHERE type='table' AND name='{newTableName}'";
+            using (var cmd = new SQLiteCommand(checkTableQuery, m_dbConnection))
+            {
+                var tableExists = cmd.ExecuteScalar() != null;
+
+                if (!tableExists)
+                {
+                    // Создаем новую таблицу с нужной структурой
+                    string createTableQuery = $@"
+                    CREATE TABLE {newTableName} (
+                    id INTEGER,
+                    WGS84_grad TEXT,
+                    formap TEXT
+                )";
+                    using (var createTableCmd = new SQLiteCommand(createTableQuery, m_dbConnection))
+                    {
+                        createTableCmd.ExecuteNonQuery();
+                        Console.WriteLine($"Таблица '{newTableName}' создана.");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"Таблица '{newTableName}' уже существует.");
+                }
+            }
 
 
+            string getDataQuery = $"SELECT id, WGS84_grad FROM {tableName}";
+            using (var cmd = new SQLiteCommand(getDataQuery, m_dbConnection))
+            {
+                using (var reader = cmd.ExecuteReader())
+                {
+                    long count =0;
+                    while (reader.Read())
+                    {
+                        // Получаем ID и значение WGS84_grad
+                        int rowId = reader.GetInt32(0); // Предполагаем, что ID - это первый столбец
+                        string data = reader["WGS84_grad"].ToString();
+
+                        // Преобразуем координаты
+                        var transformedData = TransformCoordinates(data);
+                        count++;
+                        // Обновляем значение в столбце formap
+                        if (transformedData != null) InsertIntoNewTable(rowId, data, transformedData);
+                    }
+                }
+            }
+        }
+
+        static List<string> TransformCoordinates(string data)
+        {
+            List<string> coordinates = new List<string>();
+            string result = "";
+            var mass = data.Split(' ');
+            if (mass.Length < 2 ) return null;
+            int num = -1;
+            int lastnum = -1;
+            bool except = false;
+            bool addexcept= false;
+            for (int i = 0; i < mass.Length; i++)
+            {
+                if (mass[i] == "Исключаемая")
+                {
+                    if(except) addexcept = true;
+                    except = true;
+
+                }
+                var point = mass[i].Split(':');
+                if (point.Length < 2 ) continue;
+
+                num =int.Parse(point[0]);
+                var tg = point[1].Split("g");
+                var grad = tg[0];
+                var tmin = tg[1].Split('m');
+                var min = tmin[0];
+                var tsec = tmin[1].Split('s');
+                var sec = tsec[0];
+                var dir = tsec[1];
+                double mean = double.Parse(grad) + double.Parse(min)/60.0 + double.Parse(sec)/3600.0;
+                if (lastnum < num)
+                {
+                    if (result != "") result += ", ";
+                    result += "[";
+                    result += mean.ToString().Replace(',', '.');
+                    result += ",";
+                }
+                else if (lastnum == num)
+                {
+
+                    result += mean.ToString().Replace(',', '.');
+                    result += "]";
+                }
+                else if (lastnum > num && (except||addexcept))
+                {
+                    result += "], [[";
+                    result += mean.ToString().Replace(',', '.');
+                    result += ",";
+                    except = false;
+                    addexcept = false;
+                }
+                else if (lastnum > num)
+                {
+                    result += "]";
+                    coordinates.Add(result);
+                    result = "";
+                    result += "[";
+                    result += mean.ToString().Replace(',', '.');
+                    result += ",";
+                }
+                lastnum = num;
+            }
+            coordinates.Add(result);
+            return coordinates;
+        }
+        // Метод для вставки данных в новую таблицу
+        private static void InsertIntoNewTable(int id, string wgs84Grad, List<string> formap)
+        {
+            using (var transaction = m_dbConnection.BeginTransaction())
+            {
+                try
+                {
+                    string insertQuery = $"INSERT INTO {newTableName} (id, WGS84_grad, formap) VALUES (@id, @wgs84Grad, @formap)";
+                    using (var cmd = new SQLiteCommand(insertQuery, m_dbConnection, transaction))
+                    {
+                        cmd.Parameters.Add(new SQLiteParameter("@id", DbType.Int32));
+                        cmd.Parameters.Add(new SQLiteParameter("@wgs84Grad", DbType.String));
+                        cmd.Parameters.Add(new SQLiteParameter("@formap", DbType.String));
+                        cmd.Prepare(); // Подготавливаем команду
+
+                        foreach (string s in formap)
+                        {
+                            cmd.Parameters["@id"].Value = id;
+                            cmd.Parameters["@wgs84Grad"].Value = wgs84Grad;
+                            cmd.Parameters["@formap"].Value = s;
+                            cmd.ExecuteNonQuery();
+                        }
+                    }
+                    transaction.Commit(); // Фиксируем транзакцию
+                }
+                catch (Exception ex)
+                {
+                    transaction.Rollback(); // Откатываем транзакцию в случае ошибки
+                    throw new Exception("Ошибка при вставке данных: " + ex.Message);
+                }
+            }
+        }
+
+        static void CreateNewDB()
+        {
             string path = "opendata.csv";
+            //string path = "opendata_short.csv";
 
             int lineCount = File.ReadLines(path).Count();
-           
+
             string firstLine = File.ReadLines(path).ElementAtOrDefault(0);
             string[] col2 = firstLine.Split(';');
             string[] col = new string[col2.Length];
-            for(int i = 0; i < col2.Length; i++)
+            for (int i = 0; i < col2.Length; i++)
             {
                 col2[i] = col2[i].Trim().Replace(' ', '_').Replace('/', '_').Replace(',', '_');
                 col[i] = col2[i] + " TEXT";
             }
-           
-            string[] CK = { "ГСК-2011", "СК-42", "noName" };////////////////считать из бд или создать по этой строке, нужно добавить
-           
+
+            string[] CK = { "ГСК-2011", "СК-42", "WGS-84", "noName" };////////////////считать из бд или создать по этой строке, нужно добавить
+
             CreateDB(namedb);
 
             string connectionString = "Data Source=" + namedb + ".sqlite;Version=3;";
-            m_dbConnection = new SQLiteConnection(connectionString);
+            if(m_dbConnection == null) m_dbConnection = new SQLiteConnection(connectionString);
             m_dbConnection.Open();
 
             CreateTableDB(m_dbConnection, namedb, tableName, col, CK);
             string sqlExpression = "SELECT * FROM MEAN";
 
-           
+
             SQLiteCommand command = new SQLiteCommand(sqlExpression, m_dbConnection);
             using (SQLiteDataReader reader = command.ExecuteReader())
             {
                 while (reader.Read())
                 {
                     MeanTable mean = new MeanTable();
-                    mean.Id =(long) reader.GetValue(0);
-                    mean.Grad = Convert.ToInt32( reader.GetValue(1));
+                    mean.Id = (long)reader.GetValue(0);
+                    mean.Grad = Convert.ToInt32(reader.GetValue(1));
                     mean.Minute = Convert.ToInt32(reader.GetValue(2));
-                    mean.Second = (string) reader.GetValue(3);
+                    mean.Second = (string)reader.GetValue(3);
                     meanList.Add(mean);
                 }
             }
@@ -78,15 +258,6 @@ namespace ParserGeology
             gcndb = GetColumnNameDB(m_dbConnection, namedb, tableName);
 
 
-            //List<string> lines = File.ReadAllLines(path); // Читаем все строки из файла
-
-            //foreach (string line in lines)
-            //{
-            //    semaphoreSlim.Wait(); // Ждем, чтобы не превысить лимит потоков
-            //    ThreadPool.QueueUserWorkItem(ProcessLine, line); // Помещаем задачу в пул потоков для обработки строки
-            //}
-
-            //Console.ReadLine();
             Console.WriteLine("Создание базы участков");
 
             int count = 0;
@@ -98,14 +269,14 @@ namespace ParserGeology
                     count++;
                     if (count == 1) continue;
                     string[] goparses;
-                   
+
                     ParseStr(line);
-                  
+
                     //AddToTableDB(line);
 
                 }
             }
-            while (!CheckThreadsForEnd(threads));
+            while (!CheckThreadsForEnd(threads)) ;
             stopwatch.Stop();
             long freq = Stopwatch.Frequency;
             double sec = (double)stopwatch.ElapsedTicks / freq; //переводим такты в секунды
@@ -123,6 +294,7 @@ namespace ParserGeology
             Console.WriteLine("Приложение можно закрыть");
         }
 
+
         static void ParseStr(object strokaForParse)
         {
            
@@ -136,6 +308,7 @@ namespace ParserGeology
                 goparses = parser.ReadFields();
 
             }
+
             ResultCallBackMethod(goparses);
 
         }
@@ -204,10 +377,69 @@ namespace ParserGeology
             {
                 if (i == 8)
                 {
-                    sqlSB.Append("'");
+
+
+                  // string look = MeanInTable(goparses[i], namedb, "MEAN");
+                    string[] mass = goparses[i].Split(' ');
+                    string append = "'";
                    
-                    sqlSB.Append(MeanInTable(goparses[i], namedb, "MEAN"));
-                    sqlSB.Append("', ");
+                    int count = 0;
+                    bool except = false;
+                    int lastPoint = 1;
+
+                    string lastNum = "";
+                    foreach (string s in mass)
+                    {
+                        count++;
+                        int point = -1;
+
+                       
+
+                        if (int.TryParse(s, out point))
+                        {
+                            if (except && point == 1 && point != lastPoint)
+                            {
+                                append += "Основной ";
+                                except = false;
+                            }
+                            lastNum = point + ":";                          
+                            lastPoint = point;
+                        }
+                        else if (s == "Исключаемая")
+                        {
+                            except = true;
+                            append += "Исключаемая ";
+                        }
+                        else
+                        {
+                            string pattern = "(\\d{1,3})°(\\d{1,2})'(\\d+(\\.\\d+)?)(['\"NSWE])"; // одна Е русская, вот так, East это теперь русское слово и ничего не спрашивайте
+                            string temp = s.Trim();
+                            Regex regex = new Regex(pattern);
+                            MatchCollection matches = regex.Matches(temp);
+                            char direction = ' ';
+
+
+                            if (matches.Count > 0)
+                            {
+                                append += lastNum;
+                                direction = temp.Last();
+                                foreach (Match match in matches)
+                                {
+                                    var gr = match.Groups;
+                                    append += $"{match.Groups[1].Value}g{match.Groups[2].Value}m{match.Groups[3].Value}s"+direction+ " ";
+                                }
+                            }
+                            else  if (IsNotNumberAndNotProbel(s))
+                            {
+                                lastNum = "";
+                            }
+
+                        }
+                    }
+
+                    append += "', ";
+                    sqlSB.Append(append);
+                   
                 }
                 else if (i != goparses.Length - 1) sqlSB.Append("'" + goparses[i].Replace("\'", "mut") + "'" + ", ");
 
@@ -217,21 +449,12 @@ namespace ParserGeology
                     sqlSB.Append(goparses[i]);
                     sqlSB.Append("'");
                 }
-                //switch (i)
-                //{
-                //    case 8:
-                //        sqlSB.Append("'");
-                //        sqlSB.Append(MeanInTable(goparses[i], namedb, "MEAN"));
-                //        sqlSB.Append("', ");
-                //        break;
-
-
-                //}
+               
             }
 
 
             long ticks = stopwatch.Elapsed.Ticks;
-           // Console.WriteLine((double)(ticks - tiki));
+          
             tiki = ticks;
 
 
@@ -251,6 +474,22 @@ namespace ParserGeology
            
 
         }
+
+        public static bool IsNotNumberAndNotProbel(string input)
+        {
+            // Проверка на null и пробелы
+            if (string.IsNullOrWhiteSpace(input))
+            {
+                return false; // Если строка пустая или состоит только из пробелов
+            }
+
+            // Проверка, является ли строка числом
+            double number;
+            bool isNumber = double.TryParse(input, out number);
+
+            return !isNumber; // Возвращаем true, если строка не число
+        }
+
         private static List<string> GetColumnNameDB(SQLiteConnection m_dbConnection, string namedb, string tabledb)
         {
             List<string> columns = new List<string>();
@@ -311,9 +550,15 @@ namespace ParserGeology
         {
 
             string pattern = @"(\d+)\s+(\d+°\d+'\d+\.\d+\""[NS])\s+(\d+°\d+'\d+\.\d+\""[WEЕ])"; // одна Е русская, вот так, East это теперь русское слово и ничего не спрашивайте
+          
             Regex regex = new Regex(pattern);
             MatchCollection matches = regex.Matches(mean);
-
+            if (matches.Count == 0)
+            {
+                pattern = @"(\d+)\s+(\d+°\d+\'\d+\""[NS])\s+(\d+°\d+\'\d+\""[WEЕ])";
+                regex = new Regex(pattern);
+                matches = regex.Matches(mean);
+            }
             foreach (Match match in matches)
             {
                 Console.WriteLine($"{match.Groups[1].Value}\t{match.Groups[2].Value}\t{match.Groups[3].Value}");
